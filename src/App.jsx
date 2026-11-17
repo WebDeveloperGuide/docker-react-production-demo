@@ -35,7 +35,8 @@ const principles = [
 const version = import.meta.env.VITE_APP_VERSION || '1.0.0'
 const commitSha = import.meta.env.VITE_GIT_SHA || 'local'
 const repositoryUrl =
-  import.meta.env.VITE_GITHUB_REPOSITORY_URL || 'https://github.com/'
+  import.meta.env.VITE_GITHUB_REPOSITORY_URL ||
+  'https://github.com/WebDeveloperGuide/docker-react-production-demo'
 
 function App() {
   return (

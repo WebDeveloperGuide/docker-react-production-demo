@@ -53,7 +53,10 @@ describe('application page', () => {
       name: /view on github/i,
     })
 
-    expect(githubLink).toHaveAttribute('href', 'https://github.com/')
+    expect(githubLink).toHaveAttribute(
+      'href',
+      'https://github.com/WebDeveloperGuide/docker-react-production-demo',
+    )
   })
 
   it('displays the application version and commit identifier', () => {

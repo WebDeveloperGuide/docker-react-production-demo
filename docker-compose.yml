@@ -7,7 +7,7 @@ services:
       args:
         APP_VERSION: ${APP_VERSION:-1.0.0}
         GIT_SHA: ${GIT_SHA:-local}
-        GITHUB_REPOSITORY_URL: ${GITHUB_REPOSITORY_URL:-https://github.com/}
+        GITHUB_REPOSITORY_URL: ${GITHUB_REPOSITORY_URL:-https://github.com/WebDeveloperGuide/docker-react-production-demo}
     container_name: docker-react-production-demo
     ports:
       - "8080:8080"
