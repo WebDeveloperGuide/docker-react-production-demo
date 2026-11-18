@@ -13,7 +13,7 @@ COPY public/ ./public/
 
 ARG APP_VERSION=1.0.0
 ARG GIT_SHA=local
-ARG GITHUB_REPOSITORY_URL=https://github.com/
+ARG GITHUB_REPOSITORY_URL=https://github.com/WebDeveloperGuide/docker-react-production-demo
 ENV VITE_APP_VERSION=${APP_VERSION}
 ENV VITE_GIT_SHA=${GIT_SHA}
 ENV VITE_GITHUB_REPOSITORY_URL=${GITHUB_REPOSITORY_URL}
