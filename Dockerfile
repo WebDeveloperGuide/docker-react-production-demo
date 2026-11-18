@@ -31,7 +31,8 @@ COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY nginx/security-headers.conf /etc/nginx/security-headers.conf
 COPY --from=build --chown=nginx:nginx /app/dist/ /usr/share/nginx/html/
 
-RUN rm -f /etc/nginx/conf.d/default.conf
+RUN apk upgrade --no-cache libxslt \
+    && rm -f /etc/nginx/conf.d/default.conf
 
 USER nginx
 
