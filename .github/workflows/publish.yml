@@ -1,0 +1,117 @@
+name: Publish Image
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Scan and publish GHCR image
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the exact CI commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Compute image tags
+        id: image
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="$(node -p "require('./package.json').version")"
+          sha="$UPSTREAM_SHA"
+          repository_url="https://github.com/${GITHUB_REPOSITORY}"
+
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "repository_url=$repository_url" >> "$GITHUB_OUTPUT"
+          echo "Built image: $image:$sha (version $version)"
+
+      - name: Build the release image without publishing it
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_VERSION: ${{ steps.image.outputs.version }}
+          IMAGE_SHA: ${{ steps.image.outputs.sha }}
+          REPOSITORY_URL: ${{ steps.image.outputs.repository_url }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --tag "$IMAGE_NAME:$IMAGE_SHA" \
+            --tag "$IMAGE_NAME:v$IMAGE_VERSION" \
+            --build-arg "APP_VERSION=$IMAGE_VERSION" \
+            --build-arg "GIT_SHA=$IMAGE_SHA" \
+            --build-arg "GITHUB_REPOSITORY_URL=$REPOSITORY_URL" \
+            .
+
+      - name: Scan the image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          timeout: 10m
+          version: v0.70.0
+
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.sha }}
+          format: cyclonedx
+          output: sbom.cdx.json
+          exit-code: '0'
+          timeout: 10m
+          version: v0.70.0
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ steps.image.outputs.sha }}
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the scanned image
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_VERSION: ${{ steps.image.outputs.version }}
+          IMAGE_SHA: ${{ steps.image.outputs.sha }}
+        run: |
+          docker push "$IMAGE_NAME:$IMAGE_SHA"
+          docker push "$IMAGE_NAME:v$IMAGE_VERSION"

@@ -1,0 +1,162 @@
+name: Deploy to Render
+
+on:
+  workflow_run:
+    workflows: [Publish Image]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy and verify production image
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact published commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Compute the immutable image reference
+        id: image
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "reference=$image:$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying $image:$UPSTREAM_SHA"
+
+      - name: Validate Render configuration
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          RENDER_EXTERNAL_URL: ${{ vars.RENDER_EXTERNAL_URL }}
+        run: |
+          if [[ -z "$RENDER_DEPLOY_HOOK_URL" ||
+                -z "$RENDER_API_KEY" ||
+                -z "$RENDER_SERVICE_ID" ||
+                -z "$RENDER_EXTERNAL_URL" ]]; then
+            echo "::error::Configure RENDER_DEPLOY_HOOK_URL and RENDER_API_KEY secrets, plus RENDER_SERVICE_ID and RENDER_EXTERNAL_URL variables, before deploying."
+            exit 1
+          fi
+
+      - name: Trigger Render with the exact image tag
+        id: trigger
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          response="$(curl --fail-with-body --silent --show-error \
+            --get \
+            --data-urlencode "imgURL=$IMAGE_REFERENCE" \
+            "$RENDER_DEPLOY_HOOK_URL")"
+          deploy_id="$(jq --raw-output '.id // empty' <<< "$response")"
+          if [[ -z "$deploy_id" ]]; then
+            echo "::error::Render accepted or queued the hook without returning a deploy ID. No completion can be verified; inspect Render and rerun after it is ready."
+            exit 1
+          fi
+          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+          echo "Render started deploy $deploy_id."
+
+      - name: Wait for Render to finish the deployment
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          for attempt in $(seq 1 90); do
+            response="$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$DEPLOY_ID")"
+            status="$(jq --raw-output '.status // empty' <<< "$response")"
+            echo "Render deploy status: ${status:-unknown} (attempt $attempt/90)"
+
+            case "$status" in
+              live)
+                deployed_image="$(jq --raw-output '.image.ref // empty' <<< "$response")"
+                if [[ "$deployed_image" != "$IMAGE_REFERENCE" ]]; then
+                  echo "::error::Render reports image '$deployed_image', expected '$IMAGE_REFERENCE'."
+                  exit 1
+                fi
+                exit 0
+                ;;
+              build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
+                echo "::error::Render deploy ended in terminal state '$status'."
+                exit 1
+                ;;
+              created|queued|build_in_progress|update_in_progress|pre_deploy_in_progress)
+                sleep 10
+                ;;
+              *)
+                echo "::error::Render returned an unrecognized deploy status."
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "::error::Render deployment did not reach a terminal state within 15 minutes."
+          exit 1
+
+      - name: Verify the public health endpoint
+        env:
+          RENDER_EXTERNAL_URL: ${{ vars.RENDER_EXTERNAL_URL }}
+        run: |
+          if [[ -z "$RENDER_EXTERNAL_URL" ]]; then
+            echo "::error::Set RENDER_EXTERNAL_URL to the deployed service URL."
+            exit 1
+          fi
+
+          base_url="${RENDER_EXTERNAL_URL%/}"
+          for attempt in $(seq 1 36); do
+            if curl --fail --silent --show-error \
+              --output /dev/null \
+              "$base_url/healthz"; then
+              echo "Live health endpoint returned HTTP 200."
+              exit 0
+            fi
+            echo "Waiting for live service response (attempt $attempt/36)."
+            sleep 5
+          done
+          echo "::error::Live health endpoint did not return HTTP 200."
+          exit 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run live Playwright smoke tests
+        run: npm run test:e2e:external
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ vars.RENDER_EXTERNAL_URL }}
+
+      - name: Upload smoke test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: render-smoke-failure-reports-${{ github.event.workflow_run.head_sha }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14

@@ -5,6 +5,8 @@
 ## How was it tested?
 
 - [ ] `npm run test:unit`
+- [ ] `npm run lint`
+- [ ] `npm run test:coverage`
 - [ ] `npm run test:e2e`
 - [ ] `docker compose -f docker-compose.yml up --build -d`
 - [ ] Verified `http://localhost:8080/healthz` returns HTTP 200
