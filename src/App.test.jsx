@@ -65,4 +65,19 @@ describe('application page', () => {
     expect(screen.getByText(/build v1\.0\.0/i)).toBeInTheDocument()
     expect(screen.getByText(/commit local/i)).toBeInTheDocument()
   })
+
+  it('shows deployment verification information', () => {
+    render(<App />)
+
+    const section = screen.getByRole('region', { name: 'Verify this deployment' })
+    expect(within(section).getByText('local')).toBeInTheDocument()
+    expect(within(section).getByRole('link', { name: 'View GitHub Actions' })).toHaveAttribute(
+      'href',
+      'https://github.com/WebDeveloperGuide/docker-react-production-demo/actions',
+    )
+    expect(within(section).getByRole('link', { name: 'Check health endpoint' })).toHaveAttribute(
+      'href',
+      '/healthz',
+    )
+  })
 })

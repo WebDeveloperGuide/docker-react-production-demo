@@ -36,6 +36,22 @@ test('footer and repository link are visible', async ({ page }) => {
   ).toBeVisible()
 })
 
+test('deployment verification section shows the build commit and links', async ({ page }) => {
+  await page.goto('/')
+
+  const section = page.getByRole('region', { name: 'Verify this deployment' })
+  await expect(section.getByText('Build commit')).toBeVisible()
+  await expect(section.locator('code')).not.toBeEmpty()
+  await expect(section.getByRole('link', { name: 'View GitHub Actions' })).toHaveAttribute(
+    'href',
+    'https://github.com/WebDeveloperGuide/docker-react-production-demo/actions',
+  )
+  await expect(section.getByRole('link', { name: 'Check health endpoint' })).toHaveAttribute(
+    'href',
+    '/healthz',
+  )
+})
+
 test('health endpoint returns HTTP 200', async ({ request }) => {
   const response = await request.get('/healthz')
 

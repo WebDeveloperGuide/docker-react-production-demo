@@ -539,6 +539,57 @@ h1 span,
   font-size: 12px;
 }
 
+.verification-section {
+  padding: 48px 5.3% 56px;
+  border-top: 1px solid var(--line);
+}
+
+.verification-section .eyebrow {
+  margin-bottom: 13px;
+}
+
+.verification-section h2 {
+  margin-bottom: 14px;
+  font-size: clamp(23px, 2.5vw, 31px);
+  letter-spacing: -1px;
+}
+
+.verification-section > p:not(.eyebrow) {
+  max-width: 650px;
+  color: #52635a;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.verification-details {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.verification-details dt {
+  margin-bottom: 4px;
+  color: #52635a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verification-details dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.verification-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .site-footer {
   min-height: 88px;
   display: flex;
@@ -602,7 +653,8 @@ h1 span,
   }
 
   .principles-section,
-  .lifecycle-section {
+  .lifecycle-section,
+  .verification-section {
     padding-inline: 2%;
   }
 
@@ -689,6 +741,10 @@ h1 span,
   }
 
   .lifecycle-section {
+    padding: 37px 0 42px;
+  }
+
+  .verification-section {
     padding: 37px 0 42px;
   }
 
