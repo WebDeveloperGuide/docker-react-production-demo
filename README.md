@@ -398,6 +398,11 @@ Render's reported image reference, retries the public `/healthz` endpoint for
 free-tier cold starts, and runs the same Playwright smoke tests against the
 live service.
 
+On the live page, the **Verify this deployment** section shows the build
+version and full commit SHA. Compare that SHA with the successful `Deploy to
+Render` run in GitHub Actions to check which build is being served. Local
+development displays `local` instead.
+
 The hook's HTTP response means “trigger accepted”, not “deployment succeeded”.
 The API status, image reference, health endpoint, and Playwright checks provide
 the separate completion verification. A failure is surfaced to Actions; the

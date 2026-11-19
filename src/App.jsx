@@ -166,6 +166,32 @@ function App() {
             ))}
           </ol>
         </section>
+
+        <section className="verification-section" aria-labelledby="verification-title">
+          <p className="eyebrow">CHECK YOUR RELEASE</p>
+          <h2 id="verification-title">Verify this deployment</h2>
+          <p>
+            Compare the commit below with the commit in the successful Deploy to
+            Render run. Updates appear after CI, image publishing, and deployment
+            succeed.
+          </p>
+          <dl className="verification-details">
+            <div>
+              <dt>Build version</dt>
+              <dd>v{version}</dd>
+            </div>
+            <div>
+              <dt>Build commit</dt>
+              <dd><code>{commitSha}</code></dd>
+            </div>
+          </dl>
+          <div className="verification-links">
+            <a href={`${repositoryUrl}/actions`} target="_blank" rel="noreferrer">
+              View GitHub Actions
+            </a>
+            <a href="/healthz">Check health endpoint</a>
+          </div>
+        </section>
       </main>
 
       <footer className="site-footer">
