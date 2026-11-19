@@ -31,6 +31,202 @@ deploy status through its API, and tests the public service. A webhook response
 only confirms that a deploy was triggered; the API status and live smoke tests
 are separate verification steps.
 
+## Example: from a code change to the live website
+
+This example shows what you do and what the pipeline does for you. The live
+website is [docker-react-production-demo.onrender.com](https://docker-react-production-demo.onrender.com/).
+You normally do not need to recreate the Render service, image package,
+secrets, or variables for every change. Their one-time setup is described
+later in this README.
+
+The journey looks like this:
+
+```text
+Your computer                 GitHub                          Render
+-------------                 ------                          ------
+Update code                   Open pull request
+Test locally        ------->  Run PR checks
+Commit and push               Review and merge to main
+                              Run CI again on main
+                              Build and scan Docker image
+                              Publish image to GHCR  -------> Deploy image
+                              Verify deploy and live tests    Serve website
+```
+
+### 1. Start with the latest code
+
+In PowerShell, open the repository folder and check for unfinished changes:
+
+```powershell
+git status
+```
+
+If you have uncommitted changes, save or commit them before switching branches.
+Then update your local `main` and create a branch for the example:
+
+```powershell
+git switch main
+git pull --ff-only origin main
+git switch -c feature/update-introduction
+```
+
+A **branch** is a separate place to work. A **commit** is a saved snapshot of
+your changes. If this example branch already exists, choose another name.
+
+### 2. Make a small change
+
+Open `src/App.jsx`. For example, add one sentence to the introduction while
+keeping the existing text:
+
+```jsx
+<p className="hero-description">
+  Great software doesn&apos;t just get written. It gets tested,
+  packaged, checked, and delivered—reliably, every time.
+  Every release follows the same journey.
+</p>
+```
+
+Save the file. If your change affects existing behavior or text checked by a
+test, update the relevant tests too. Saving the file only changes your
+computer; it does not change the live website.
+
+### 3. Run and check the change locally
+
+Install the locked dependencies and start the development server:
+
+```powershell
+npm ci
+npm run dev
+```
+
+Open the URL printed in the terminal and confirm the new sentence appears.
+Stop the server with `Ctrl+C`. Then run the checks:
+
+```powershell
+npm run lint
+npm run test:coverage
+npm run test:e2e
+```
+
+If Playwright says Chromium is missing, run `npx playwright install chromium`
+and then retry `npm run test:e2e`. The E2E command builds the app and runs
+browser tests against a temporary local preview. Fix any failures before
+continuing. These commands do not deploy anything.
+
+### 4. Commit and push your branch
+
+Review your changes, then save and send them to GitHub:
+
+```powershell
+git status
+git diff
+git add src/App.jsx
+git commit -m "feat: update introduction"
+git push --set-upstream origin feature/update-introduction
+```
+
+If you changed tests or other files, review and add those files too before
+committing. Pushing the branch uploads your work to GitHub; it does not by
+itself deploy the app.
+
+### 5. Open a pull request and wait for its checks
+
+On the [GitHub repository](https://github.com/WebDeveloperGuide/docker-react-production-demo),
+open a **pull request** from `feature/update-introduction` into `main`. A pull
+request (PR) lets you review the proposed change before it joins `main`.
+
+GitHub automatically starts the **CI** workflow. On the PR's **Checks** tab,
+you can see these jobs:
+
+| Check | What it does |
+|---|---|
+| Code quality | Runs ESLint to find code problems. |
+| Unit tests | Runs component tests and uploads a coverage report. |
+| Production build | Confirms Vite can build the app. |
+| Production container E2E tests | Builds and starts the Docker image, then uses Playwright to test it and `/healthz`. |
+| Dependency and secret scans | Audits npm dependencies and scans Git history for secrets. The full audit has the documented temporary exception in [`SECURITY.md`](./SECURITY.md). |
+| CodeQL analysis | Scans the source for security and code-quality issues. |
+| Required CI checks | Passes only when all the mandatory CI jobs above pass. |
+
+Wait for the checks, review the PR, and fix any failures before merging. A PR
+may cause a downstream workflow run to appear as **skipped**; PR checks do not
+publish or deploy an image. Branch protection must be configured separately if
+you want GitHub to enforce the PR and required-check rules.
+
+### 6. Merge the pull request
+
+Once review and checks are complete, merge the PR into `main` on GitHub.
+GitHub runs **CI** again for the resulting `main` commit. The deployable image
+is produced only after that push-triggered CI run succeeds.
+
+The **commit SHA** is the long identifier for a particular Git commit. The
+`main` commit SHA used for publishing may differ from the feature-branch
+commit SHA, depending on how the PR was merged.
+
+### 7. GitHub builds, scans, and publishes the image
+
+After successful CI on `main`, the **Publish Image** workflow:
+
+1. Checks out the exact `main` commit that passed CI.
+2. Builds a Docker image: the Node stage compiles the React app, and the Nginx
+   stage serves the resulting static files.
+3. Scans the image with Trivy for high and critical vulnerabilities. A finding
+   can stop publication, including when a fix is not yet available.
+4. Creates a CycloneDX SBOM (a list of image components) and uploads it as an
+   Actions artifact.
+5. Pushes the scanned image to GitHub Container Registry (GHCR).
+
+For example, the SHA tag has this shape:
+
+```text
+ghcr.io/webdeveloperguide/docker-react-production-demo:<full-main-commit-SHA>
+```
+
+Replace the placeholder with the SHA from the successful run; it is not a
+literal image tag. There is also a version tag, but deployment uses the SHA
+tag so the image can be matched to the code that was built. A public GitHub
+repository and a public GHCR package have separate visibility settings.
+
+### 8. GitHub asks Render to deploy and verifies it
+
+After the image publish succeeds, **Deploy to Render** starts automatically:
+
+1. It checks that the Render repository secrets and variables are present.
+2. It sends the image's exact SHA tag to the Render deploy hook.
+3. It uses the returned deploy ID and Render API to wait for the deployment to
+   become `live`, then checks Render's reported image reference.
+4. It checks the public `/healthz` endpoint and runs Playwright smoke tests
+   against the live website.
+
+The hook accepting a request is not proof that the deploy is live. Render
+auto-deploy from Git is not needed for this image-backed flow: GitHub Actions
+triggers Render after publishing. If a deployment is already in progress, Render
+may queue the hook without returning an ID; the workflow fails rather than
+claiming the queued deploy was verified.
+
+### 9. Confirm your change is live
+
+1. Open the repository's [Actions page](https://github.com/WebDeveloperGuide/docker-react-production-demo/actions).
+   Find the **CI**, **Publish Image**, and **Deploy to Render** runs for your
+   `main` commit. Confirm each completed successfully; a green PR check alone
+   does not mean the change is live.
+2. Open the [live website](https://docker-react-production-demo.onrender.com/)
+   and look for the new sentence.
+3. In **Verify this deployment**, compare **Build commit** with the full
+   `main` commit SHA shown in the successful deployment run. The build version
+   may remain the same between deployments; the SHA identifies the build.
+4. Open [the live health endpoint](https://docker-react-production-demo.onrender.com/healthz).
+   It should return `ok` with HTTP 200. This confirms the endpoint responds,
+   not that every feature works.
+
+If the page still looks old, wait for the deployment and refresh the browser.
+Free Render services may take time to wake up. If a workflow fails, open the
+failed job in Actions and read its logs; check Render's **Deploys** page for
+deploy status. A failed live smoke test can happen after Render has already
+made an image live, and this pipeline does not automatically roll it back.
+See [Rollback and troubleshooting](#rollback-and-troubleshooting) before
+retrying or rolling back.
+
 ## Technology
 
 - React and Vite; JavaScript and CSS
