@@ -10,6 +10,42 @@ learning focus is Docker, testing, GitHub Actions, security checks, and
 deployment. This is a learning project, not a claim that the demo is suitable
 for a critical production workload.
 
+## How to read this guide
+
+You can read this file from top to bottom:
+
+1. Learn the [basic words](#basic-words) used in this project.
+2. See the [architecture](#architecture) and what happens behind the scenes.
+3. Read [how each part works](#how-each-part-works) for a plain-language
+   explanation of the tools.
+4. Follow the [worked example](#example-from-a-code-change-to-the-live-website)
+   when you are ready to try a change yourself.
+5. Use the setup, testing, Docker, deployment, and troubleshooting sections for
+   more detail.
+6. Finish with the [complete flow](#complete-flow-from-code-to-live) for a
+   summary of how all the pieces work together.
+
+## Basic words
+
+| Word | Simple meaning |
+|---|---|
+| **Repository (repo)** | The project folder and its recorded history. GitHub hosts a copy online. |
+| **Branch** | A separate line of work, so you can change the project without editing `main` directly. |
+| **Commit** | A saved snapshot of changes. Each commit has an identifier called a **SHA**. |
+| **Pull request (PR)** | A request to review and merge changes from one branch into another. |
+| **Merge** | Bringing changes from a branch into another branch, such as `main`. |
+| **Dependency** | A package the project uses, such as React or a testing tool. |
+| **Build** | Turning source code into files ready to run or serve. |
+| **CI** | Continuous integration: automatically checking changes with builds, tests, and scans. |
+| **CD** | Continuous deployment: delivering a successfully prepared change to the live service. |
+| **Workflow** | A set of automated jobs defined in a GitHub Actions file. |
+| **Docker image** | A packaged template containing what is needed to run the app. |
+| **Container** | A running instance of a Docker image. |
+| **Registry** | A storage service for Docker images. This project uses GitHub Container Registry (GHCR). |
+| **Deploy** | Start serving a particular version of the app in an environment such as Render. |
+| **Health check** | A simple request that checks whether a service endpoint responds. |
+| **Secret** | A private value, such as an API key, that must not be added to public code. |
+
 ## Architecture
 
 ```mermaid
@@ -20,16 +56,507 @@ flowchart LR
     Checks -->|checks pass and merge to main| Publish[Build image]
     Publish --> Trivy[Trivy scan and CycloneDX SBOM]
     Trivy -->|scan passes| GHCR[GitHub Container Registry]
-    GHCR -->|immutable commit-SHA image| Render[Render web service]
+    GHCR -->|commit-SHA image tag| Render[Render web service]
     Render --> Verify[Deploy API status, health check, Playwright smoke tests]
 ```
 
 Pull requests never publish images. The image workflow waits for the `CI`
 workflow to succeed on a push to `main`. The deployment workflow then uses
 Render's image deploy hook with the exact Git SHA image tag, checks the Render
-deploy status through its API, and tests the public service. A webhook response
-only confirms that a deploy was triggered; the API status and live smoke tests
-are separate verification steps.
+deploy status through its API, and tests the public service. A deploy-hook
+response may mean a deploy started or was queued; the API status and live
+smoke tests are separate verification steps.
+
+### What each part does
+
+Think of the system as two connected paths: a **delivery path** that prepares
+and releases the app, and a **request path** that serves it to a visitor.
+
+| Part | Where it runs | What it does |
+|---|---|---|
+| React app | A visitor's browser | Displays the page using JavaScript, HTML, and CSS. |
+| Vite | Your computer and GitHub Actions | Runs a development server locally and builds production files into `dist/`. |
+| Git and GitHub | Your computer and GitHub | Track code changes, branches, commits, reviews, and pull requests. |
+| GitHub Actions | GitHub-hosted runners | Runs checks, builds and scans the image, publishes it, and triggers deployment. |
+| Docker and Nginx | GitHub Actions for builds; Render for hosting | Docker packages the built site; Nginx serves its files over HTTP. |
+| GHCR | GitHub Container Registry | Stores the built Docker image so Render can pull it. |
+| Render | Render's infrastructure | Runs the image as a web service and provides the public URL. |
+| Playwright | Your computer or GitHub Actions | Opens Chromium and checks that important page content and the health endpoint work. |
+
+This app is a static frontend: there is no application backend or database.
+Render is hosting the Nginx container, not running the Vite development server.
+
+### Behind the scenes: delivery path
+
+```mermaid
+sequenceDiagram
+    actor Developer
+    participant GitHub
+    participant CI as CI workflow
+    participant Publish as Publish Image workflow
+    participant GHCR as Container registry
+    participant CD as Deploy to Render workflow
+    participant Render
+    Developer->>GitHub: Push branch and open PR
+    GitHub->>CI: Run PR checks
+    CI-->>GitHub: Report checks and coverage
+    Developer->>GitHub: Review and merge PR into main
+    GitHub->>CI: Run checks for main commit
+    CI->>Publish: Successful main push CI completes
+    Publish->>Publish: Build image, scan, create SBOM
+    Publish->>GHCR: Push image tagged with commit SHA
+    Publish->>CD: Successful publishing completes
+    CD->>Render: Deploy hook with image tag
+    CD->>Render: Poll deploy status using Render API
+    Render->>GHCR: Pull published image
+    Render-->>CD: Report deployment live and image reference
+    CD->>Render: Check health and run browser smoke tests
+```
+
+In more detail:
+
+1. **A pull request starts checks, not a release.** GitHub runs the jobs in
+   `.github/workflows/ci.yml` for a PR targeting `main`. These jobs run on
+   GitHub-hosted Linux machines called *runners*. They install dependencies
+   from `package-lock.json`; separate jobs lint, test, build, run container
+   browser checks, and scan for dependency and secret issues. CI also calls
+   `.github/workflows/codeql.yml` for CodeQL analysis.
+2. **The CI result combines the jobs.** The `Required CI checks` job checks
+   that all mandatory jobs succeeded. It reports a status; branch protection
+   must be configured separately to require that status before a merge.
+3. **A merge triggers another CI run.** After a PR is merged, the push to
+   `main` runs CI for the resulting `main` commit. A green PR run checks the
+   proposed change; the `main` run checks the commit that will be released.
+4. **Publishing waits for that CI run.** `.github/workflows/publish.yml` uses
+   a `workflow_run` event when CI completes. Its publish job runs only for a
+   successful CI run caused by a push to `main` in this repository. A PR or
+   failed CI run cannot publish through this job. A downstream workflow may
+   still appear as skipped in Actions.
+5. **The release uses the tested commit.** The publishing job checks out
+   `github.event.workflow_run.head_sha`, the commit from the completed CI run.
+   It passes that SHA, the package version, and the repository URL as build
+   arguments. Vite embeds these non-secret values in the frontend so the page
+   can show which build is being served.
+6. **The image is checked before it is pushed.** Docker builds a `linux/amd64`
+   image, Trivy scans it, and an SBOM is uploaded as a GitHub Actions artifact.
+   Only after the scan passes does the workflow log in to GHCR using
+   `GITHUB_TOKEN` and push the image with both a full commit-SHA tag and a
+   version tag.
+7. **Deployment waits for publishing.** `.github/workflows/cd.yml` listens for
+   completion of `Publish Image` and runs its deploy job only when that
+   upstream run succeeded on `main` in this repository. It requests the image
+   tag based on the upstream commit SHA, rather than asking Render to rebuild
+   from the Git repository.
+8. **A hook starts deployment; the API verifies it.** The deploy hook receives
+   the image reference in `imgURL`. When Render returns a deploy ID, GitHub
+   Actions polls that deploy through the Render API. The job checks for `live`
+   and compares Render's reported image reference with the requested one.
+9. **Live checks run separately.** After Render reports the deploy live, the
+   workflow requests the public `/healthz` endpoint and runs Playwright
+   against the public URL. A successful deployment workflow means these
+   checks passed as well as the Render API checks; it is not proof that every
+   possible user journey works.
+
+The SHA tag is a traceable naming convention, not a registry-enforced
+immutable tag: someone with package write access can repush a tag. The version
+tag can also move when a version is rebuilt. Keep package access restricted and
+retain known-good SHA tags for rollback.
+
+### Behind the scenes: build and container
+
+The `Dockerfile` has two stages:
+
+```text
+Node build stage                           Nginx production stage
+----------------                           ----------------------
+Copy package manifests                     Start from Nginx image
+npm ci                                     Copy Nginx configuration
+Copy source and public files               Copy only built dist/ files
+Set public build metadata                  Update libxslt package
+npm run build  --------------------------> Run Nginx as nginx user
+Produces dist/                             Serve the static website
+```
+
+- **Why two stages?** Node and development dependencies are needed to build
+  the site, but the final image only needs Nginx and the built files. That
+  keeps build tooling out of the running image.
+- **Why the lockfile first?** Copying `package.json` and `package-lock.json`
+  before the source lets Docker reuse the dependency layer when those files
+  have not changed. `.dockerignore` keeps local dependencies and other
+  unnecessary files out of the build context.
+- **Which base images?** Node and Nginx base images are pinned by tag and
+  digest. The production stage also runs `apk upgrade --no-cache libxslt`, so
+  that package can update at build time; a pinned base alone does not make
+  the final image completely reproducible. The publish workflow rebuilds the
+  production stage instead of using its cached layers.
+- **Which image goes to Render?** The same locally built image is scanned,
+  tagged, and pushed. The tag contains the main commit SHA; Render pulls that
+  reference from GHCR. GHCR is an image store, not the live website.
+- **How does local Compose differ?** Compose exposes the container at
+  `localhost:8080`, sets `PORT=8080`, uses a read-only root filesystem and a
+  writable `/tmp`, and drops Linux capabilities. Render runs the published
+  image as its own web service; do not assume Compose's local runtime settings
+  are automatically applied there.
+
+### Behind the scenes: when someone opens the website
+
+```text
+Browser
+  |  HTTPS request to docker-react-production-demo.onrender.com
+  v
+Render's web service
+  |  forwards the request to the container's listening port
+  v
+Nginx inside the container
+  |  serves index.html, CSS, JavaScript, or the health response
+  v
+Browser runs the React application and displays the page
+```
+
+1. The visitor opens the Render URL. Render routes the request to the running
+   container. Nginx listens on the `PORT` environment variable; the image
+   defaults to `10000`.
+2. Nginx serves `index.html` from `/usr/share/nginx/html`. The browser then
+   requests the generated JavaScript and CSS assets and runs React. There is
+   no server-side React rendering or backend API in this demo.
+3. For an unknown application route, Nginx falls back to `index.html` so the
+   single-page app can handle it. Missing files under `/assets/` return 404
+   instead of the HTML page.
+4. Generated assets under `/assets/` receive long-lived cache headers;
+   `index.html` is configured not to be cached in the same way. Nginx also
+   sends browser security headers and compresses supported response types.
+5. A request to `/healthz` returns `ok` directly from Nginx. This is a simple
+   availability probe, not a test of the React page, image identity, or every
+   feature. Playwright provides an additional browser-level check.
+
+### Credentials and security boundaries
+
+| Value or credential | Used by | Purpose |
+|---|---|---|
+| GitHub `GITHUB_TOKEN` | Publish workflow | Authenticates to GHCR to push the image; GitHub provides it to the job. |
+| `RENDER_DEPLOY_HOOK_URL` repository secret | Deploy workflow | Allows Actions to request a Render deployment. |
+| `RENDER_API_KEY` repository secret | Deploy workflow | Authenticates API requests that check deployment status. |
+| `RENDER_SERVICE_ID` repository variable | Deploy workflow | Identifies the Render service whose deploy is checked. |
+| `RENDER_EXTERNAL_URL` repository variable | Deploy workflow | Tells health and browser tests where to find the live app. |
+| `APP_VERSION`, `GIT_SHA`, `GITHUB_REPOSITORY_URL` build arguments | Docker build and Vite | Provide **public** metadata shown in the built frontend. |
+
+The Render hook and API key belong in GitHub **repository secrets**, not in
+source files, build arguments, frontend variables, logs, or chat. The service
+ID and public URL go in **repository variables**. This workflow does not select
+a GitHub environment, so environment-scoped values alone will not be available
+to it. See [Render: one-time setup](#render-one-time-setup) for where to add
+them and [`SECURITY.md`](./SECURITY.md) for the audit exception and reporting
+guidance.
+
+Dependabot separately checks npm and GitHub Actions dependencies on its
+configured schedule and proposes update PRs. It does not silently merge or
+deploy them. Security scans reduce risk but do not guarantee the app is secure.
+
+## How each part works
+
+These sections explain the tools individually. The [complete flow](#complete-flow-from-code-to-live)
+at the end then puts them together.
+
+### Git and GitHub: keep and review the code
+
+**Git** records changes on your computer. When you commit, Git saves a snapshot
+and gives it a SHA. **GitHub** stores a remote copy of the repository and
+provides pull requests for review.
+
+For example, you can change `src/App.jsx` on a feature branch, commit the
+change, and push that branch to GitHub. Opening a PR lets you compare the
+branch with `main`. The live site does not change just because the branch was
+pushed: first the PR needs to be merged and the later delivery steps must pass.
+
+### React, Node, npm, and Vite: create the website
+
+**React** describes what the page displays. `src/App.jsx` contains its
+structure and text, and `src/App.css` contains its styling. The visitor's
+browser runs the built React JavaScript.
+
+**Node.js** runs the development and build tools. **npm** installs the
+packages listed in `package.json`; `npm ci` uses `package-lock.json` to install
+the recorded versions. **Vite** runs a local development server and turns the
+source into production HTML, JavaScript, and CSS under `dist/`.
+
+For example, `npm run dev` lets you see an edit on your computer. Later,
+`npm run build` creates the files that Nginx can serve. The local development
+server and the live Render service are different things.
+
+### Tests and security checks: catch problems
+
+GitHub Actions runs several kinds of checks because each answers a different
+question:
+
+| Tool or check | In simple terms |
+|---|---|
+| ESLint | Does the JavaScript follow the configured rules? |
+| Vitest and React Testing Library | Do the tested React components render the expected content? |
+| Playwright | Can a browser load the site and find the important content? |
+| npm audit | Are there known security advisories in the dependencies? |
+| Gitleaks | Does the Git history contain possible secrets? |
+| CodeQL | Does source analysis find potential security or code-quality issues? |
+| Trivy | Does the built image contain high- or critical-severity findings? |
+
+CI runs the first six categories for a PR and for a `main` push. Trivy runs
+later, during image publishing. Tests and scans are useful signals, not a
+guarantee that every possible problem has been found. The npm audit policy
+includes the limited exception described in [`SECURITY.md`](./SECURITY.md).
+
+### GitHub Actions: automate the jobs
+
+GitHub Actions reads workflow files in `.github/workflows/` and runs their
+steps on temporary GitHub-hosted computers called **runners**.
+
+For this project:
+
+- **CI** checks the code and reports the result.
+- **Publish Image** builds, scans, and pushes an image after successful CI on
+  a `main` push.
+- **Deploy to Render** asks Render to use the published image and checks the
+  deployment after successful publishing.
+
+Each workflow has its own job and logs. A green PR check is only the first
+part of the journey; look at the later `main` runs to confirm publication and
+deployment. The exact conditions are explained in the
+[delivery path](#behind-the-scenes-delivery-path).
+
+### Docker and Nginx: package and serve the app
+
+Docker creates an **image**, which is like a prepared package. Starting that
+image creates a **container**, a running instance of the package.
+
+This project's Docker build first uses Node and Vite to produce the site files.
+It then copies those files into an Nginx image. **Nginx** is the web server
+inside the final container: when a browser requests the site, Nginx sends back
+the built files. See [build and container](#behind-the-scenes-build-and-container)
+for the two stages and [Docker concepts](#docker-concepts-in-practice) for more
+examples.
+
+### GHCR: store the image
+
+GitHub Container Registry (**GHCR**) stores the image that the publish workflow
+creates. It is separate from the GitHub repository: the repository stores code;
+GHCR stores the packaged image.
+
+The workflow tags the image with the full `main` commit SHA. Render can then
+pull that tag. Package visibility is managed separately from repository
+visibility; this project's Render setup uses a public image.
+
+### Render: run the image and provide the live URL
+
+Render hosts the web service and runs the image pulled from GHCR. A **deploy
+hook** is a private URL that GitHub Actions calls to request a deployment.
+Actions also uses a Render API key to check the deployment's status.
+
+Render reporting `live` means its deployment reached the live state. GitHub
+Actions then checks `/healthz` and runs browser smoke tests. The live address
+is [docker-react-production-demo.onrender.com](https://docker-react-production-demo.onrender.com/).
+See [Render setup](#render-one-time-setup) for the one-time configuration.
+
+### The browser: display the finished page
+
+When someone visits the live URL, Render routes the request to Nginx in the
+container. Nginx sends the built page files to the browser. The browser runs
+the JavaScript and displays the React page. See
+[when someone opens the website](#behind-the-scenes-when-someone-opens-the-website)
+for the request path and caching details.
+
+## Example: from a code change to the live website
+
+This example shows what you do and what the pipeline does for you. The live
+website is [docker-react-production-demo.onrender.com](https://docker-react-production-demo.onrender.com/).
+You normally do not need to recreate the Render service, image package,
+secrets, or variables for every change. Their one-time setup is described
+later in this README.
+
+The journey looks like this:
+
+```text
+Your computer                 GitHub                          Render
+-------------                 ------                          ------
+Update code                   Open pull request
+Test locally        ------->  Run PR checks
+Commit and push               Review and merge to main
+                              Run CI again on main
+                              Build and scan Docker image
+                              Publish image to GHCR  -------> Deploy image
+                              Verify deploy and live tests    Serve website
+```
+
+### 1. Start with the latest code
+
+In PowerShell, open the repository folder and check for unfinished changes:
+
+```powershell
+git status
+```
+
+If you have uncommitted changes, save or commit them before switching branches.
+Then update your local `main` and create a branch for the example:
+
+```powershell
+git switch main
+git pull --ff-only origin main
+git switch -c feature/update-introduction
+```
+
+A **branch** is a separate place to work. A **commit** is a saved snapshot of
+your changes. If this example branch already exists, choose another name.
+
+### 2. Make a small change
+
+Open `src/App.jsx`. For example, add one sentence to the introduction while
+keeping the existing text:
+
+```jsx
+<p className="hero-description">
+  Great software doesn&apos;t just get written. It gets tested,
+  packaged, checked, and delivered—reliably, every time.
+  Every release follows the same journey.
+</p>
+```
+
+Save the file. If your change affects existing behavior or text checked by a
+test, update the relevant tests too. Saving the file only changes your
+computer; it does not change the live website.
+
+### 3. Run and check the change locally
+
+Install the locked dependencies and start the development server:
+
+```powershell
+npm ci
+npm run dev
+```
+
+Open the URL printed in the terminal and confirm the new sentence appears.
+Stop the server with `Ctrl+C`. Then run the checks:
+
+```powershell
+npm run lint
+npm run test:coverage
+npm run test:e2e
+```
+
+If Playwright says Chromium is missing, run `npx playwright install chromium`
+and then retry `npm run test:e2e`. The E2E command builds the app and runs
+browser tests against a temporary local preview. Fix any failures before
+continuing. These commands do not deploy anything.
+
+### 4. Commit and push your branch
+
+Review your changes, then save and send them to GitHub:
+
+```powershell
+git status
+git diff
+git add src/App.jsx
+git commit -m "feat: update introduction"
+git push --set-upstream origin feature/update-introduction
+```
+
+If you changed tests or other files, review and add those files too before
+committing. Pushing the branch uploads your work to GitHub; it does not by
+itself deploy the app.
+
+### 5. Open a pull request and wait for its checks
+
+On the [GitHub repository](https://github.com/WebDeveloperGuide/docker-react-production-demo),
+open a **pull request** from `feature/update-introduction` into `main`. A pull
+request (PR) lets you review the proposed change before it joins `main`.
+
+GitHub automatically starts the **CI** workflow. On the PR's **Checks** tab,
+you can see these jobs:
+
+| Check | What it does |
+|---|---|
+| Code quality | Runs ESLint to find code problems. |
+| Unit tests | Runs component tests and uploads a coverage report. |
+| Production build | Confirms Vite can build the app. |
+| Production container E2E tests | Builds and starts the Docker image, then uses Playwright to test it and `/healthz`. |
+| Dependency and secret scans | Audits npm dependencies and scans Git history for secrets. The full audit has the documented temporary exception in [`SECURITY.md`](./SECURITY.md). |
+| CodeQL analysis | Scans the source for security and code-quality issues. |
+| Required CI checks | Passes only when all the mandatory CI jobs above pass. |
+
+Wait for the checks, review the PR, and fix any failures before merging. A PR
+may cause a downstream workflow run to appear as **skipped**; PR checks do not
+publish or deploy an image. Branch protection must be configured separately if
+you want GitHub to enforce the PR and required-check rules.
+
+### 6. Merge the pull request
+
+Once review and checks are complete, merge the PR into `main` on GitHub.
+GitHub runs **CI** again for the resulting `main` commit. The deployable image
+is produced only after that push-triggered CI run succeeds.
+
+The **commit SHA** is the long identifier for a particular Git commit. The
+`main` commit SHA used for publishing may differ from the feature-branch
+commit SHA, depending on how the PR was merged.
+
+### 7. GitHub builds, scans, and publishes the image
+
+After successful CI on `main`, the **Publish Image** workflow:
+
+1. Checks out the exact `main` commit that passed CI.
+2. Builds a Docker image: the Node stage compiles the React app, and the Nginx
+   stage serves the resulting static files.
+3. Scans the image with Trivy for high and critical vulnerabilities. A finding
+   can stop publication, including when a fix is not yet available.
+4. Creates a CycloneDX SBOM (a list of image components) and uploads it as an
+   Actions artifact.
+5. Pushes the scanned image to GitHub Container Registry (GHCR).
+
+For example, the SHA tag has this shape:
+
+```text
+ghcr.io/webdeveloperguide/docker-react-production-demo:<full-main-commit-SHA>
+```
+
+Replace the placeholder with the SHA from the successful run; it is not a
+literal image tag. There is also a version tag, but deployment uses the SHA
+tag so the image can be matched to the code that was built. A public GitHub
+repository and a public GHCR package have separate visibility settings.
+
+### 8. GitHub asks Render to deploy and verifies it
+
+After the image publish succeeds, **Deploy to Render** starts automatically:
+
+1. It checks that the Render repository secrets and variables are present.
+2. It sends the image's exact SHA tag to the Render deploy hook.
+3. It uses the returned deploy ID and Render API to wait for the deployment to
+   become `live`, then checks Render's reported image reference.
+4. It checks the public `/healthz` endpoint and runs Playwright smoke tests
+   against the live website.
+
+The hook accepting a request is not proof that the deploy is live. Render
+auto-deploy from Git is not needed for this image-backed flow: GitHub Actions
+triggers Render after publishing. If a deployment is already in progress, Render
+may queue the hook without returning an ID; the workflow fails rather than
+claiming the queued deploy was verified.
+
+### 9. Confirm your change is live
+
+1. Open the repository's [Actions page](https://github.com/WebDeveloperGuide/docker-react-production-demo/actions).
+   Find the **CI**, **Publish Image**, and **Deploy to Render** runs for your
+   `main` commit. Confirm each completed successfully; a green PR check alone
+   does not mean the change is live.
+2. Open the [live website](https://docker-react-production-demo.onrender.com/)
+   and look for the new sentence.
+3. In **Verify this deployment**, compare **Build commit** with the full
+   `main` commit SHA shown in the successful deployment run. The build version
+   may remain the same between deployments; the SHA identifies the build.
+4. Open [the live health endpoint](https://docker-react-production-demo.onrender.com/healthz).
+   It should return `ok` with HTTP 200. This confirms the endpoint responds,
+   not that every feature works.
+
+If the page still looks old, wait for the deployment and refresh the browser.
+Free Render services may take time to wake up. If a workflow fails, open the
+failed job in Actions and read its logs; check Render's **Deploys** page for
+deploy status. A failed live smoke test can happen after Render has already
+made an image live, and this pipeline does not automatically roll it back.
+See [Rollback and troubleshooting](#rollback-and-troubleshooting) before
+retrying or rolling back.
 
 ## Technology
 
@@ -456,3 +983,32 @@ The frontend is static and contains no secret-bearing backend. Values compiled
 into a Vite app are public. Never put tokens, passwords, deploy hooks, or API
 keys in `VITE_*` variables, source code, Docker build args, or a public
 workflow log.
+
+## Complete flow: from code to live
+
+Imagine you want to add the sentence **“Every release follows the same
+journey.”** to the page. Here is the whole journey, with your actions and the
+automatic steps separated. The [worked example](#example-from-a-code-change-to-the-live-website)
+above includes the commands for trying it.
+
+| Step | Who does it? | What happens | What to look for |
+|---|---|---|---|
+| 1. Get ready | You | Update local `main` and create a feature branch. | You are working on the new branch, not directly on `main`. |
+| 2. Change the app | You | Edit `src/App.jsx` and save the sentence. | The change exists on your computer only. |
+| 3. Check locally | You | Run the app, lint, unit tests, and browser tests. | The sentence appears locally and the checks pass. |
+| 4. Share the work | You | Commit the change and push your branch to GitHub. | The branch and commit appear in the GitHub repository. |
+| 5. Request review | You | Open a PR from your branch to `main`. | The PR shows your proposed changes. |
+| 6. Check the PR | GitHub Actions | CI runs lint, tests, a build, container checks, and security scans. | Review the checks; `Required CI checks` should pass before merge. |
+| 7. Merge | You | Review and merge the PR into `main`. | The change is in `main`, but may not yet be live. |
+| 8. Check `main` | GitHub Actions | CI runs again for the resulting `main` commit. | The `CI` run for that commit succeeds. |
+| 9. Package and publish | GitHub Actions | Builds the Docker image, scans it with Trivy, creates an SBOM, and pushes it to GHCR. | The `Publish Image` run succeeds and uses the `main` commit SHA. |
+| 10. Deploy | GitHub Actions and Render | Actions sends the SHA-tagged image to the Render deploy hook; Render pulls and runs it. | Render reports the deployment `live` and the expected image reference. |
+| 11. Verify | GitHub Actions | Checks `/healthz` and runs Playwright against the live service. | The `Deploy to Render` run succeeds. |
+| 12. See the change | You | Open the live website and its **Verify this deployment** section. | The new sentence appears and the build commit matches the successful deployment run. |
+
+If a check fails, open the failed job's logs in GitHub Actions and fix the
+reported problem. A failed publishing scan prevents that image from being
+published; a failed deployment or live check needs investigation in Actions
+and Render. The site may already be serving a new image if a live check fails,
+and rollback is not automatic. See [Rollback and troubleshooting](#rollback-and-troubleshooting)
+before taking action.
