@@ -62,7 +62,7 @@ jobs:
             --get \
             --data-urlencode "imgURL=$IMAGE_REFERENCE" \
             "$RENDER_DEPLOY_HOOK_URL")"
-          deploy_id="$(jq --raw-output '.id // empty' <<< "$response")"
+          deploy_id="$(jq --raw-output '.deploy.id // empty' <<< "$response")"
           if [[ -z "$deploy_id" ]]; then
             echo "::error::Render accepted or queued the hook without returning a deploy ID. No completion can be verified; inspect Render and rerun after it is ready."
             exit 1
